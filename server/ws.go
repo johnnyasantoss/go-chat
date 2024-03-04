@@ -2,11 +2,12 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"time"
+
+	"johnnyasantos.com/chat/shared"
 
 	"github.com/gorilla/websocket"
 )
@@ -19,38 +20,99 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:       func(r *http.Request) bool { return true },
 }
 
-func serveHome(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.Error(w, "Not found", http.StatusNotFound)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	http.ServeFile(w, r, "home.html")
-}
-
-func serveWs(w http.ResponseWriter, r *http.Request, server *http.Server) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-
+func serveWs(resW http.ResponseWriter, req *http.Request, server *http.Server) {
+	conn, err := upgrader.Upgrade(resW, req, nil)
 	if err != nil {
 		log.Println("Failed to upgrade ws connection", err)
-		fmt.Fprint(w, "Failed to upgrade connection")
+		http.Error(resW, "Failed to upgrade ws connection", http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
 
+	userName := "TODO"
+	userNameHeader := req.Header["X-UserName"]
+	if len(userNameHeader) > 0 {
+		userName = userNameHeader[0]
+	}
+
+	user := shared.NewUser(userName, conn)
+
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	server.RegisterOnShutdown(cancel)
+	closedByUser := false
+
+	chatCtx, ok := ChatContextFromContext(ctx)
+
+	if !ok {
+		log.Fatalf("Invalid context on ws upgrade: %T\n", req.Context())
+		http.Error(resW, "Internal error", http.StatusInternalServerError)
 		return
 	}
 
-	server.RegisterOnShutdown(func() {
-		log.Println("Closing connection on client", conn.RemoteAddr())
-
-		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "bye")
-		err := conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
-
-		if err != nil {
-			log.Println("Failed to close connection on client", conn.RemoteAddr(), err)
-		}
+	connCloseHandler := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		closedByUser = true
+		cancel()
+		return connCloseHandler(code, text)
 	})
+
+	chatCtx.Room.AddUser(user)
+	defer chatCtx.Room.RemoveUser(user)
+
+	userMessages := readUserMessages(ctx, conn)
+
+userLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			break userLoop
+		case message, ok := <-userMessages:
+			if !ok {
+				break userLoop
+			}
+
+			log.Printf("Message: %s: %s\n", user.Name, message)
+
+			chatCtx.Room.Broadcast(user, message)
+		case msg := <-user.Inbox:
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+				log.Println("Failed to send message to user", user.Name)
+				break userLoop
+			}
+		}
+	}
+
+	log.Println("Closing connection on client", conn.RemoteAddr())
+
+	if closedByUser {
+		return
+	}
+
+	msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "bye")
+
+	if err := conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second)); err != nil {
+		log.Println("Failed to close connection on client", conn.RemoteAddr(), err)
+	}
+}
+
+func readUserMessages(ctx context.Context, conn *websocket.Conn) chan []byte {
+	userMessages := make(chan []byte, 1)
+
+	go func() {
+		for {
+			_, message, err := conn.ReadMessage()
+
+			if ctx.Err() != nil || err != nil {
+				close(userMessages)
+				break
+			}
+
+			userMessages <- message
+		}
+	}()
+
+	return userMessages
 }
 
 func StartWsServer(ctx context.Context) {
@@ -61,12 +123,18 @@ func StartWsServer(ctx context.Context) {
 		Addr:              ":1337",
 		ReadHeaderTimeout: 3 * time.Second,
 		Handler:           mux,
-		BaseContext:       func(l net.Listener) context.Context { return context.WithValue(ctx, "test", "test") },
+		BaseContext: func(l net.Listener) context.Context {
+			return ctx
+		},
 	}
 
-	mux.HandleFunc("/", serveHome)
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(w, r, server)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ws":
+			serveWs(w, r, server)
+		default:
+			http.Error(w, "Use the chat client", http.StatusBadRequest)
+		}
 	})
 
 	go func() {

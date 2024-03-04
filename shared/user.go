@@ -3,6 +3,15 @@ package shared
 import "github.com/gorilla/websocket"
 
 type User struct {
-	name string
-	conn *websocket.Conn
+	Name  string
+	Conn  *websocket.Conn
+	Inbox chan string
+}
+
+func NewUser(name string, conn *websocket.Conn) *User {
+	return &User{
+		Name:  name,
+		Conn:  conn,
+		Inbox: make(chan string, 10),
+	}
 }

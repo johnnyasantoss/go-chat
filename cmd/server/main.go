@@ -16,7 +16,12 @@ func main() {
 	defer cancel()
 	shared.HandleSignals(cancel)
 
-	server.StartWsServer(ctx)
+	lobby := shared.NewRoom("Lobby")
+	chatCtx := server.NewChatContext(ctx, lobby)
+
+	go lobby.Serve(ctx)
+
+	server.StartWsServer(chatCtx)
 
 	time.Sleep(1 * time.Second)
 
