@@ -50,6 +50,8 @@ func serveWs(resW http.ResponseWriter, req *http.Request, server *http.Server) {
 		return
 	}
 
+	room := chatCtx.Room
+
 	connCloseHandler := conn.CloseHandler()
 	conn.SetCloseHandler(func(code int, text string) error {
 		closedByUser = true
@@ -57,8 +59,8 @@ func serveWs(resW http.ResponseWriter, req *http.Request, server *http.Server) {
 		return connCloseHandler(code, text)
 	})
 
-	chatCtx.Room.AddUser(user)
-	defer chatCtx.Room.RemoveUser(user)
+	room.AddUser(user)
+	defer room.RemoveUser(user)
 
 	userMessages := readUserMessages(ctx, conn)
 
@@ -74,7 +76,7 @@ userLoop:
 
 			log.Printf("Message: %s: %s\n", user.Name, message)
 
-			chatCtx.Room.Broadcast(user, message)
+			room.Broadcast(user, message)
 		case msg := <-user.Inbox:
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 				log.Println("Failed to send message to user", user.Name)
@@ -96,7 +98,7 @@ userLoop:
 	}
 }
 
-func readUserMessages(ctx context.Context, conn *websocket.Conn) chan []byte {
+func readUserMessages(ctx context.Context, conn *websocket.Conn) <-chan []byte {
 	userMessages := make(chan []byte, 1)
 
 	go func() {
